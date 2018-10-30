@@ -131,7 +131,8 @@ pipeline {
               name: "avoidance",
               test: "mavros_posix_test_avoidance.test",
               mission: "avoidance",
-              vehicle: "iris"
+              vehicle: "iris",
+              run_script: "rostest_avoidance_run.sh"
             ],
 
           ]
@@ -218,6 +219,7 @@ def createTestNode(Map test_def) {
       cleanWs()
       docker.image("px4io/px4-dev-ros-kinetic:2018-09-11").inside('-e HOME=${WORKSPACE} --cap-add SYS_PTRACE') {
         stage(test_def.name) {
+          def run_script = test_def.get('run_script', 'rostest_px4_run.sh')
           def test_ok = true
           sh('export')
 
@@ -227,11 +229,11 @@ def createTestNode(Map test_def) {
           }
 
           unstash('px4_sitl_package')
-          sh('tar -xjpvf build/posix_sitl_default/px4-posix_sitl_default*.bz2')            
+          sh('tar -xjpvf build/posix_sitl_default/px4-posix_sitl_default*.bz2')
 
           // run test
           try {
-            sh('px4-posix_sitl_default*/px4/test/rostest_px4_run.sh ' + test_def.test + ' mission:=' + test_def.mission + ' vehicle:=' + test_def.vehicle)
+            sh('px4-posix_sitl_default*/px4/test/' + run_script + ' ' + test_def.test + ' mission:=' + test_def.mission + ' vehicle:=' + test_def.vehicle)
 
           } catch (exc) {
             // save all test artifacts for debugging
