@@ -165,3 +165,4 @@ if(REPLAY_FILE)
 	add_definitions(-DORB_USE_PUBLISHER_RULES)
 endif()
 
+set(LOCKSTEP_SCHEDULER_NEEDED yes)
