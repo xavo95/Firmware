@@ -1,6 +1,10 @@
 
 set(CMAKE_TOOLCHAIN_FILE ${PX4_SOURCE_DIR}/cmake/toolchains/Toolchain-native.cmake)
 
+add_definitions(
+  -D__PX4_POSIX_SITL
+)
+
 set(config_module_list
 	#drivers/barometer
 	drivers/differential_pressure
