@@ -45,6 +45,7 @@
 #include <drivers/drv_hrt.h>
 #include <matrix/matrix/math.hpp>
 #include <uORB/Subscription.hpp>
+#include <uORB/topics/landing_gear.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_command.h>
@@ -68,6 +69,7 @@ public:
 
 	/**
 	 * Initialize the uORB subscriptions using an array
+	 * @param subscription_array handling uORB subscribtions externally across task switches
 	 * @return true on success, false on error
 	 */
 	virtual bool initializeSubscriptions(SubscriptionArray &subscription_array);
@@ -85,9 +87,10 @@ public:
 
 	/**
 	 * To be called to adopt parameters from an arrived vehicle command
+	 * @param command received command message containing the parameters
 	 * @return true if accepted, false if declined
 	 */
-	virtual bool applyCommandParameters(const vehicle_command_s &command) { return true; }
+	virtual bool applyCommandParameters(const vehicle_command_s &command) { return false; }
 
 	/**
 	 * Call before activate() or update()
@@ -103,7 +106,16 @@ public:
 	virtual bool update() = 0;
 
 	/**
+	 * Call after update()
+	 * to constrain the generated setpoints in order to comply
+	 * with the constraints of the current mode
+	 * @return true on success, false on error
+	 */
+	virtual bool updateFinalize() { return true; };
+
+	/**
 	 * Get the output data
+	 * @return task output setpoints that get executed by the positon controller
 	 */
 	const vehicle_local_position_setpoint_s getPositionSetpoint();
 
@@ -113,6 +125,13 @@ public:
 	 * @return constraints
 	 */
 	const vehicle_constraints_s &getConstraints() { return _constraints; }
+
+	/**
+	 * Get landing gear position.
+	 * The constraints can vary with task.
+	 * @return landing gear
+	 */
+	const landing_gear_s &getGear() { return _gear; }
 
 	/**
 	 * Get avoidance desired waypoint
@@ -131,6 +150,11 @@ public:
 	 * All constraints are set to NAN.
 	 */
 	static const vehicle_constraints_s empty_constraints;
+
+	/**
+	 * default landing gear state
+	 */
+	static const landing_gear_s empty_landing_gear_default_keep;
 
 	/**
 	 * Empty desired waypoints.
@@ -161,20 +185,17 @@ protected:
 	uORB::Subscription<vehicle_attitude_s> *_sub_attitude{nullptr};
 	uint8_t _heading_reset_counter{0}; /**< estimator heading reset */
 
-	/**
-	 * Reset all setpoints to NAN
-	 */
+	/** Reset all setpoints to NAN */
 	void _resetSetpoints();
 
-	/**
-	 * Check and update local position
-	 */
+	/** Check and update local position */
 	void _evaluateVehicleLocalPosition();
 
-	/**
-	 * Set constraints to default values
-	 */
-	virtual void  _setDefaultConstraints();
+	/** Set constraints to default values */
+	virtual void _setDefaultConstraints();
+
+	/** determines when to trigger a takeoff (ignored in flight) */
+	virtual bool _checkTakeoff();
 
 	/* Time abstraction */
 	static constexpr uint64_t _timeout = 500000; /**< maximal time in us before a loop or data times out */
@@ -215,6 +236,8 @@ protected:
 	 */
 	vehicle_constraints_s _constraints{};
 
+	landing_gear_s _gear{};
+
 	/**
 	 * Desired waypoints.
 	 * Goals set by the FCU to be sent to the obstacle avoidance system.
@@ -222,9 +245,9 @@ protected:
 	vehicle_trajectory_waypoint_s _desired_waypoint{};
 
 	DEFINE_PARAMETERS_CUSTOM_PARENT(ModuleParams,
-					(ParamFloat<px4::params::MPC_XY_VEL_MAX>) MPC_XY_VEL_MAX,
-					(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) MPC_Z_VEL_MAX_DN,
-					(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) MPC_Z_VEL_MAX_UP,
-					(ParamFloat<px4::params::MPC_TILTMAX_AIR>) MPC_TILTMAX_AIR
+					(ParamFloat<px4::params::MPC_XY_VEL_MAX>) _param_mpc_xy_vel_max,
+					(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_dn,
+					(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up,
+					(ParamFloat<px4::params::MPC_TILTMAX_AIR>) _param_mpc_tiltmax_air
 				       )
 };

@@ -43,8 +43,9 @@
  */
 
 #include <px4_config.h>
-#include <px4_workqueue.h>
+#include <px4_work_queue/ScheduledWorkItem.hpp>
 #include <px4_getopt.h>
+#include <px4_module.h>
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
@@ -81,20 +82,16 @@
 
 /* Configuration Constants */
 
-#ifndef CONFIG_SCHED_WORKQUEUE
-# error This requires CONFIG_SCHED_WORKQUEUE.
-#endif
-
-class TFMINI : public cdev::CDev
+class TFMINI : public cdev::CDev, public px4::ScheduledWorkItem
 {
 public:
 	TFMINI(const char *port, uint8_t rotation = distance_sensor_s::ROTATION_DOWNWARD_FACING);
 	virtual ~TFMINI();
 
-	virtual int init();
+	virtual int init() override;
 
-	virtual ssize_t read(device::file_t *filp, char *buffer, size_t buflen);
-	virtual int ioctl(device::file_t *filp, int cmd, unsigned long arg);
+	virtual ssize_t read(device::file_t *filp, char *buffer, size_t buflen) override;
+	virtual int ioctl(device::file_t *filp, int cmd, unsigned long arg) override;
 
 	/**
 	* Diagnostics - print some basic information about the driver.
@@ -107,9 +104,8 @@ private:
 	float                    _min_distance;
 	float                    _max_distance;
 	int                      _conversion_interval;
-	work_s                   _work{};
 	ringbuffer::RingBuffer  *_reports;
-	int                      _measure_ticks;
+	int                      _measure_interval;
 	bool                     _collect_phase;
 	int                      _fd;
 	char                     _linebuf[10];
@@ -150,17 +146,8 @@ private:
 	* Perform a poll cycle; collect from the previous measurement
 	* and start a new one.
 	*/
-	void				cycle();
+	void				Run() override;
 	int				collect();
-
-	/**
-	* Static trampoline from the workq context; because we don't have a
-	* generic workq wrapper yet.
-	*
-	* @param arg		Instance pointer for the driver that is polling.
-	*/
-	static void			cycle_trampoline(void *arg);
-
 
 };
 
@@ -171,12 +158,13 @@ extern "C" __EXPORT int tfmini_main(int argc, char *argv[]);
 
 TFMINI::TFMINI(const char *port, uint8_t rotation) :
 	CDev(RANGE_FINDER0_DEVICE_PATH),
+	ScheduledWorkItem(px4::wq_configurations::hp_default),
 	_rotation(rotation),
 	_min_distance(0.30f),
 	_max_distance(12.0f),
 	_conversion_interval(9000),
 	_reports(nullptr),
-	_measure_ticks(0),
+	_measure_interval(0),
 	_collect_phase(false),
 	_fd(-1),
 	_linebuf_index(0),
@@ -189,7 +177,8 @@ TFMINI::TFMINI(const char *port, uint8_t rotation) :
 	_comms_errors(perf_alloc(PC_COUNT, "tfmini_com_err"))
 {
 	/* store port name */
-	strncpy(_port, port, sizeof(_port));
+	strncpy(_port, port, sizeof(_port) - 1);
+
 	/* enforce null termination */
 	_port[sizeof(_port) - 1] = '\0';
 }
@@ -369,10 +358,10 @@ TFMINI::ioctl(device::file_t *filp, int cmd, unsigned long arg)
 			/* set default polling rate */
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
+					bool want_start = (_measure_interval == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_ticks = USEC2TICK(_conversion_interval);
+					_measure_interval = (_conversion_interval);
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -386,18 +375,18 @@ TFMINI::ioctl(device::file_t *filp, int cmd, unsigned long arg)
 			default: {
 
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
+					bool want_start = (_measure_interval == 0);
 
 					/* convert hz to tick interval via microseconds */
-					int ticks = USEC2TICK(1000000 / arg);
+					int interval = (1000000 / arg);
 
 					/* check against maximum rate */
-					if (ticks < USEC2TICK(_conversion_interval)) {
+					if (interval < _conversion_interval) {
 						return -EINVAL;
 					}
 
 					/* update interval for next measurement */
-					_measure_ticks = ticks;
+					_measure_interval = interval;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -428,7 +417,7 @@ TFMINI::read(device::file_t *filp, char *buffer, size_t buflen)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_ticks > 0) {
+	if (_measure_interval > 0) {
 
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
@@ -451,7 +440,7 @@ TFMINI::read(device::file_t *filp, char *buffer, size_t buflen)
 		_reports->flush();
 
 		/* wait for it to complete */
-		usleep(_conversion_interval);
+		px4_usleep(_conversion_interval);
 
 		/* run the collection phase */
 		if (OK != collect()) {
@@ -539,7 +528,7 @@ TFMINI::collect()
 	report.current_distance = distance_m;
 	report.min_distance = get_minimum_distance();
 	report.max_distance = get_maximum_distance();
-	report.covariance = 0.0f;
+	report.variance = 0.0f;
 	report.signal_quality = -1;
 	/* TODO: set proper ID */
 	report.id = 0;
@@ -566,25 +555,17 @@ TFMINI::start()
 	_reports->flush();
 
 	/* schedule a cycle to start things */
-	work_queue(HPWORK, &_work, (worker_t)&TFMINI::cycle_trampoline, this, 1);
+	ScheduleNow();
 }
 
 void
 TFMINI::stop()
 {
-	work_cancel(HPWORK, &_work);
+	ScheduleClear();
 }
 
 void
-TFMINI::cycle_trampoline(void *arg)
-{
-	TFMINI *dev = (TFMINI *)arg;
-
-	dev->cycle();
-}
-
-void
-TFMINI::cycle()
+TFMINI::Run()
 {
 	/* fds initialized? */
 	if (_fd < 0) {
@@ -600,11 +581,8 @@ TFMINI::cycle()
 
 		if (collect_ret == -EAGAIN) {
 			/* reschedule to grab the missing bits, time to transmit 9 bytes @ 115200 bps */
-			work_queue(HPWORK,
-				   &_work,
-				   (worker_t)&TFMINI::cycle_trampoline,
-				   this,
-				   USEC2TICK(87 * 9));
+			ScheduleDelayed(87 * 9);
+
 			return;
 		}
 
@@ -614,14 +592,10 @@ TFMINI::cycle()
 		/*
 		 * Is there a collect->measure gap?
 		 */
-		if (_measure_ticks > USEC2TICK(_conversion_interval)) {
-
-			/* schedule a fresh cycle call when we are ready to measure again */
-			work_queue(HPWORK,
-				   &_work,
-				   (worker_t)&TFMINI::cycle_trampoline,
-				   this,
-				   _measure_ticks - USEC2TICK(_conversion_interval));
+		if (_measure_interval > (_conversion_interval)) {
+			/* schedule a fresh cycle call when
+			 * we are ready to measure again */
+			ScheduleDelayed(_measure_interval - _conversion_interval);
 
 			return;
 		}
@@ -631,11 +605,7 @@ TFMINI::cycle()
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	work_queue(HPWORK,
-		   &_work,
-		   (worker_t)&TFMINI::cycle_trampoline,
-		   this,
-		   USEC2TICK(_conversion_interval));
+	ScheduleDelayed(_conversion_interval);
 }
 
 void
@@ -644,7 +614,7 @@ TFMINI::print_info()
 	printf("Using port '%s'\n", _port);
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	printf("poll interval:  %d ticks\n", _measure_ticks);
+	printf("poll interval:  %d \n", _measure_interval);
 	_reports->print_info("report queue");
 }
 
@@ -823,8 +793,32 @@ info()
 void
 usage()
 {
-	printf("usage:\n");
-	printf("tfmini start -d <device path> -R (optional) <rotation>:\n");
+	PRINT_MODULE_DESCRIPTION(
+		R"DESCR_STR(
+### Description
+
+Serial bus driver for the Benewake TFmini LiDAR.
+
+Most boards are configured to enable/start the driver on a specified UART using the SENS_TFMINI_CFG parameter.
+
+Setup/usage information: https://docs.px4.io/en/sensor/tfmini.html
+
+### Examples
+
+Attempt to start driver on a specified serial device.
+$ tfmini start -d /dev/ttyS1
+Stop driver
+$ tfmini stop
+)DESCR_STR");
+
+	PRINT_MODULE_USAGE_NAME("tfmini", "driver");
+	PRINT_MODULE_USAGE_SUBCATEGORY("distance_sensor");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("start","Start driver");
+	PRINT_MODULE_USAGE_PARAM_STRING('d', nullptr, nullptr, "Serial device", false);
+	PRINT_MODULE_USAGE_PARAM_INT('R', 25, 1, 25, "Sensor rotation - downward facing by default", true);
+	PRINT_MODULE_USAGE_COMMAND_DESCR("stop","Stop driver");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("test","Test driver (basic functional tests)");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("info","Print driver information");
 }
 
 } // namespace
@@ -895,6 +889,7 @@ tfmini_main(int argc, char *argv[])
 	}
 
 out_error:
-	PX4_ERR("unrecognized command, try 'start', 'test', or 'info'");
+	PX4_ERR("unrecognized command");
+        tfmini::usage();
 	return -1;
 }

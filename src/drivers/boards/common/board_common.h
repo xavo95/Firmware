@@ -232,14 +232,6 @@
 #define BOARD_BATTERY2_A_PER_V 0.0f
 #endif
 
-/* Conditional use of FMU GPIO
- * If the board use the PX4FMU driver and the board provides
- * BOARD_FMU_GPIO_TAB then we publish the logical BOARD_HAS_FMU_GPIO
- */
-#if defined(BOARD_FMU_GPIO_TAB)
-#  define BOARD_HAS_FMU_GPIO
-#endif
-
 /* Conditional use of PX4 PIO is Used to determine if the board
  * has a PX4IO processor.
  * We then publish the logical BOARD_USES_PX4IO
@@ -255,7 +247,7 @@
 #  else
 /*  Use PX4IO FW search paths defaults based on version */
 #    if BOARD_USES_PX4IO_VERSION == 2
-#      define PX4IO_FW_SEARCH_PATHS {"/etc/extras/px4io-v2.bin", "/fs/microsd/px4io2.bin", "/fs/microsd/px4io.bin", nullptr }
+#      define PX4IO_FW_SEARCH_PATHS {"/etc/extras/px4_io-v2_default.bin","/fs/microsd/px4_io-v2_default.bin", "/fs/microsd/px4io2.bin", nullptr }
 #    endif
 #  endif
 #endif
@@ -323,6 +315,14 @@
 #    define BOARD_ARMED_STATE_LED_ON()
 #  endif
 #endif //
+
+/* Provide an overridable default nop
+ * for BOARD_INDICATE_ARMED_STATE
+ */
+
+#if !defined(BOARD_INDICATE_ARMED_STATE)
+#  define BOARD_INDICATE_ARMED_STATE(on_armed)
+#endif
 
 /************************************************************************************
  * Public Data
@@ -1082,6 +1082,24 @@ __EXPORT bool px4_spi_bus_external(int bus);
 #endif /* PX4_SPI_BUS_EXT */
 
 #endif /* BOARD_HAS_SIMPLE_HW_VERSIONING */
+
+/************************************************************************************
+ * Name: board_has_bus
+ *
+ ************************************************************************************/
+
+enum board_bus_types {
+	BOARD_SPI_BUS = 1,
+	BOARD_I2C_BUS = 2
+};
+
+#if defined(BOARD_HAS_BUS_MANIFEST)
+
+__EXPORT bool board_has_bus(enum board_bus_types type, uint32_t bus);
+
+#else
+#  define board_has_bus(t, b) true
+#endif /* BOARD_HAS_BUS_MANIFEST */
 
 /************************************************************************************
  * Name: board_hardfault_init

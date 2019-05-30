@@ -41,7 +41,8 @@
 
 #include <px4_config.h>
 #include <px4_getopt.h>
-#include <px4_workqueue.h>
+#include <px4_work_queue/ScheduledWorkItem.hpp>
+#include <containers/Array.hpp>
 
 #include <drivers/device/i2c.h>
 
@@ -56,7 +57,6 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
-#include <vector>
 
 #include <perf/perf_counter.h>
 
@@ -85,23 +85,19 @@
 #define MB12XX_MAX_DISTANCE 	(7.65f)
 
 #define MB12XX_CONVERSION_INTERVAL 	100000 /* 60ms for one sonar */
-#define TICKS_BETWEEN_SUCCESIVE_FIRES 	100000 /* 30ms between each sonar measurement (watch out for interference!) */
+#define MB12XX_INTERVAL_BETWEEN_SUCCESIVE_FIRES 	100000 /* 30ms between each sonar measurement (watch out for interference!) */
 
-#ifndef CONFIG_SCHED_WORKQUEUE
-# error This requires CONFIG_SCHED_WORKQUEUE.
-#endif
-
-class MB12XX : public device::I2C
+class MB12XX : public device::I2C, public px4::ScheduledWorkItem
 {
 public:
 	MB12XX(uint8_t rotation = distance_sensor_s::ROTATION_DOWNWARD_FACING,
 	       int bus = MB12XX_BUS_DEFAULT, int address = MB12XX_BASEADDR);
 	virtual ~MB12XX();
 
-	virtual int 		init();
+	virtual int 		init() override;
 
-	virtual ssize_t		read(device::file_t *filp, char *buffer, size_t buflen);
-	virtual int			ioctl(device::file_t *filp, int cmd, unsigned long arg);
+	virtual ssize_t		read(device::file_t *filp, char *buffer, size_t buflen) override;
+	virtual int			ioctl(device::file_t *filp, int cmd, unsigned long arg) override;
 
 	/**
 	* Diagnostics - print some basic information about the driver.
@@ -109,16 +105,15 @@ public:
 	void				print_info();
 
 protected:
-	virtual int			probe();
+	virtual int			probe() override;
 
 private:
 	uint8_t _rotation;
 	float				_min_distance;
 	float				_max_distance;
-	work_s				_work{};
 	ringbuffer::RingBuffer		*_reports;
 	bool				_sensor_ok;
-	int				_measure_ticks;
+	int				_measure_interval;
 	bool				_collect_phase;
 	int				_class_instance;
 	int				_orb_class_instance;
@@ -131,10 +126,7 @@ private:
 	uint8_t				_cycle_counter;	/* counter in cycle to change i2c adresses */
 	int					_cycling_rate;	/* */
 	uint8_t				_index_counter;	/* temporary sonar i2c address */
-	std::vector<uint8_t>	addr_ind; 	/* temp sonar i2c address vector */
-	std::vector<float>
-	_latest_sonar_measurements; /* vector to store latest sonar measurements in before writing to report */
-
+	px4::Array<uint8_t, RANGE_FINDER_MAX_SENSORS>	addr_ind; 	/* temp sonar i2c address vector */
 
 	/**
 	* Test whether the device supported by the driver is present at a
@@ -172,17 +164,9 @@ private:
 	* Perform a poll cycle; collect from the previous measurement
 	* and start a new one.
 	*/
-	void				cycle();
+	void					Run() override;
 	int					measure();
 	int					collect();
-	/**
-	* Static trampoline from the workq context; because we don't have a
-	* generic workq wrapper yet.
-	*
-	* @param arg		Instance pointer for the driver that is polling.
-	*/
-	static void			cycle_trampoline(void *arg);
-
 
 };
 
@@ -193,12 +177,13 @@ extern "C" __EXPORT int mb12xx_main(int argc, char *argv[]);
 
 MB12XX::MB12XX(uint8_t rotation, int bus, int address) :
 	I2C("MB12xx", MB12XX_DEVICE_PATH, bus, address, 100000),
+	ScheduledWorkItem(px4::device_bus_to_wq(get_device_id())),
 	_rotation(rotation),
 	_min_distance(MB12XX_MIN_DISTANCE),
 	_max_distance(MB12XX_MAX_DISTANCE),
 	_reports(nullptr),
 	_sensor_ok(false),
-	_measure_ticks(0),
+	_measure_interval(0),
 	_collect_phase(false),
 	_class_instance(-1),
 	_orb_class_instance(-1),
@@ -208,7 +193,6 @@ MB12XX::MB12XX(uint8_t rotation, int bus, int address) :
 	_cycle_counter(0),	/* initialising counter for cycling function to zero */
 	_cycling_rate(0),	/* initialising cycling rate (which can differ depending on one sonar or multiple) */
 	_index_counter(0) 	/* initialising temp sonar i2c address to zero */
-
 {
 }
 
@@ -264,12 +248,12 @@ MB12XX::init()
 	}
 
 	// XXX we should find out why we need to wait 200 ms here
-	usleep(200000);
+	px4_usleep(200000);
 
 	/* check for connected rangefinders on each i2c port:
 	   We start from i2c base address (0x70 = 112) and count downwards
 	   So second iteration it uses i2c address 111, third iteration 110 and so on*/
-	for (unsigned counter = 0; counter <= MB12XX_MAX_RANGEFINDERS; counter++) {
+	for (unsigned counter = 0; counter <= RANGE_FINDER_MAX_SENSORS; counter++) {
 		_index_counter = MB12XX_BASEADDR - counter;	/* set temp sonar i2c address to base adress - counter */
 		set_device_address(_index_counter);			/* set I2c port to temp sonar i2c adress */
 		int ret2 = measure();
@@ -277,7 +261,6 @@ MB12XX::init()
 		if (ret2 == 0) { /* sonar is present -> store address_index in array */
 			addr_ind.push_back(_index_counter);
 			PX4_DEBUG("sonar added");
-			_latest_sonar_measurements.push_back(200);
 		}
 	}
 
@@ -289,7 +272,7 @@ MB12XX::init()
 		_cycling_rate = MB12XX_CONVERSION_INTERVAL;
 
 	} else {
-		_cycling_rate = TICKS_BETWEEN_SUCCESIVE_FIRES;
+		_cycling_rate = MB12XX_INTERVAL_BETWEEN_SUCCESIVE_FIRES;
 	}
 
 	/* show the connected sonars in terminal */
@@ -351,10 +334,10 @@ MB12XX::ioctl(device::file_t *filp, int cmd, unsigned long arg)
 			/* set default polling rate */
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
+					bool want_start = (_measure_interval == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_ticks = USEC2TICK(_cycling_rate);
+					_measure_interval = _cycling_rate;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -368,18 +351,18 @@ MB12XX::ioctl(device::file_t *filp, int cmd, unsigned long arg)
 			/* adjust to a legal polling interval in Hz */
 			default: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
+					bool want_start = (_measure_interval == 0);
 
 					/* convert hz to tick interval via microseconds */
-					int ticks = USEC2TICK(1000000 / arg);
+					int interval = (1000000 / arg);
 
 					/* check against maximum rate */
-					if (ticks < USEC2TICK(_cycling_rate)) {
+					if (interval < _cycling_rate) {
 						return -EINVAL;
 					}
 
 					/* update interval for next measurement */
-					_measure_ticks = ticks;
+					_measure_interval = interval;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -411,7 +394,7 @@ MB12XX::read(device::file_t *filp, char *buffer, size_t buflen)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_ticks > 0) {
+	if (_measure_interval > 0) {
 
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
@@ -440,7 +423,7 @@ MB12XX::read(device::file_t *filp, char *buffer, size_t buflen)
 		}
 
 		/* wait for it to complete */
-		usleep(_cycling_rate * 2);
+		px4_usleep(_cycling_rate * 2);
 
 		/* run the collection phase */
 		if (OK != collect()) {
@@ -511,7 +494,7 @@ MB12XX::collect()
 	report.current_distance = distance_m;
 	report.min_distance = get_minimum_distance();
 	report.max_distance = get_maximum_distance();
-	report.covariance = 0.0f;
+	report.variance = 0.0f;
 	report.signal_quality = -1;
 	/* TODO: set proper ID */
 	report.id = 0;
@@ -541,27 +524,17 @@ MB12XX::start()
 	_reports->flush();
 
 	/* schedule a cycle to start things */
-	work_queue(HPWORK, &_work, (worker_t)&MB12XX::cycle_trampoline, this, 5);
+	ScheduleDelayed(5);
 }
 
 void
 MB12XX::stop()
 {
-	work_cancel(HPWORK, &_work);
+	ScheduleClear();
 }
 
 void
-MB12XX::cycle_trampoline(void *arg)
-{
-
-	MB12XX *dev = (MB12XX *)arg;
-
-	dev->cycle();
-
-}
-
-void
-MB12XX::cycle()
+MB12XX::Run()
 {
 	if (_collect_phase) {
 		_index_counter = addr_ind[_cycle_counter]; /*sonar from previous iteration collect is now read out */
@@ -588,14 +561,11 @@ MB12XX::cycle()
 		/* Is there a collect->measure gap? Yes, and the timing is set equal to the cycling_rate
 		   Otherwise the next sonar would fire without the first one having received its reflected sonar pulse */
 
-		if (_measure_ticks > USEC2TICK(_cycling_rate)) {
+		if (_measure_interval > _cycling_rate) {
 
 			/* schedule a fresh cycle call when we are ready to measure again */
-			work_queue(HPWORK,
-				   &_work,
-				   (worker_t)&MB12XX::cycle_trampoline,
-				   this,
-				   _measure_ticks - USEC2TICK(_cycling_rate));
+			ScheduleDelayed(_measure_interval - _cycling_rate);
+
 			return;
 		}
 	}
@@ -615,12 +585,7 @@ MB12XX::cycle()
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	work_queue(HPWORK,
-		   &_work,
-		   (worker_t)&MB12XX::cycle_trampoline,
-		   this,
-		   USEC2TICK(_cycling_rate));
-
+	ScheduleDelayed(_cycling_rate);
 }
 
 void
@@ -628,7 +593,7 @@ MB12XX::print_info()
 {
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	printf("poll interval:  %u ticks\n", _measure_ticks);
+	printf("poll interval:  %u\n", _measure_interval);
 	_reports->print_info("report queue");
 }
 

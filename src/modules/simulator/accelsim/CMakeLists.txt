@@ -36,6 +36,8 @@ px4_add_module(
 	MAIN accelsim
 	COMPILE_FLAGS
 		-Wno-double-promotion
+		-Wno-cast-align # TODO: fix and enable
+		-Wno-address-of-packed-member # TODO: fix in c_library_v2
 	SRCS
 		accelsim.cpp
 	DEPENDS

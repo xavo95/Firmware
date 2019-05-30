@@ -40,6 +40,8 @@
 #include <lib/perf/perf_counter.h>
 #include <px4_config.h>
 #include <systemlib/conversions.h>
+#include <systemlib/err.h>
+#include <px4_work_queue/ScheduledWorkItem.hpp>
 
 #define DIR_READ                0x80
 #define DIR_WRITE               0x00
@@ -57,11 +59,6 @@ class BMI055 : public device::SPI
 protected:
 
 	uint8_t         _whoami;    /** whoami result */
-
-	struct hrt_call     _call;
-	unsigned        _call_interval;
-
-	unsigned        _dlpf_freq;
 
 	uint8_t         _register_wait;
 	uint64_t        _reset_wait;

@@ -66,17 +66,16 @@ public:
 	 */
 	bool initializeSubscriptions(SubscriptionArray &subscription_array);
 
-	bool is_active() { return MPC_COL_PREV_D.get() > 0; }
+	bool is_active() { return _param_mpc_col_prev_d.get() > 0; }
 
 	void modifySetpoint(matrix::Vector2f &original_setpoint, const float max_speed);
 
 private:
 
-	bool _is_active = true;
 	bool _interfering = false;		/**< states if the collision prevention interferes with the user input */
 
 	orb_advert_t _constraints_pub{nullptr};		/**< constraints publication */
-	orb_advert_t _mavlink_log_pub = nullptr;	 	/**< Mavlink log uORB handle */
+	orb_advert_t _mavlink_log_pub{nullptr};	 	/**< Mavlink log uORB handle */
 
 	uORB::Subscription<obstacle_distance_s> *_sub_obstacle_distance{nullptr}; /**< obstacle distances received form a range sensor */
 
@@ -91,7 +90,7 @@ private:
 	matrix::Vector2f _move_constraints_y;
 
 	DEFINE_PARAMETERS(
-		(ParamFloat<px4::params::MPC_COL_PREV_D>) MPC_COL_PREV_D /**< collision prevention keep minimum distance */
+		(ParamFloat<px4::params::MPC_COL_PREV_D>) _param_mpc_col_prev_d /**< collision prevention keep minimum distance */
 	)
 
 	void update();
